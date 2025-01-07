@@ -12,6 +12,8 @@ Telegram channel: [https://t.me/ravenmarket\_ai](https://t.me/ravenmarket_ai)
 
 X (Twitter): [https://x.com/RavenMarketAI](https://x.com/RavenMarketAI)
 
+Github: [https://github.com/ravenmarket](https://github.com/ravenmarket)
+
 Contract address (CA): 71WCNAJjb7xx2HQbysqoPdDmSPatmGBN8sudXG1Zpump
 
 [\
