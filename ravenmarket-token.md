@@ -16,7 +16,7 @@ Chain: Solana
 
 TGE: Jan, 2025
 
-Contract address (CA):&#x20;
+Contract address (CA): 71WCNAJjb7xx2HQbysqoPdDmSPatmGBN8sudXG1Zpump
 
 ## $RM Utility <a href="#usdsnap-utility" id="usdsnap-utility"></a>
 
