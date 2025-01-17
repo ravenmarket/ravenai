@@ -1,42 +1,46 @@
+use std::collections::BTreeMap;
+
 use anchor_lang::{prelude::*, solana_program::{program::invoke_signed, system_instruction}};
-use pyth_sdk::{Price, PriceFeed};
-use pyth_sdk_solana::state::{PriceStatus, SolanaPriceAccount};
-use crate::{error::MarketError, Bet, Direction, Round, State, ESCROW_SEED, STATE_SEED};
+use pyth_solana_receiver_sdk::price_update::{get_feed_id_from_hex, PriceUpdateV2};
+use crate::error::MarketError;
+use crate::constants::*;
+use crate::state::*;
+
 
 // --------------------------
 //    4.7 UserBet
 // --------------------------
-pub fn user_bet_impl(
-    ctx: Context<UserBet>,
+
+#[derive(AnchorDeserialize, AnchorSerialize)]
+pub struct UserBetArgs {
+    market_id: String,
+    round_index: u32,
     direction: u8,
     amount: u64,
-    market_id: String,
-) -> Result<()> {
-    require!(amount > 0, MarketError::InvalidArgument);
+}
 
-    let st = &mut ctx.accounts.state;
+pub fn user_bet_impl<'a>(ctx: Context<UserBet>, args: UserBetArgs) -> Result<()> {
+    require!(args.amount > 0, MarketError::InvalidArgument);
+
+    let state = &mut ctx.accounts.state;
     let user = &ctx.accounts.user;
     let escrow = &ctx.accounts.escrow;
 
-    require_keys_eq!(escrow.key(), st.escrow_vault);
-
-    let mk_opt = st.markets.iter_mut().find(|m| m.market_id == market_id);
-    require!(mk_opt.is_some(), MarketError::InvalidArgument);
+    let mk_opt = state.markets.iter().find(|m| m.market_id == args.market_id);
+    require!(mk_opt.is_some(), MarketError::InvalidMarket);
     let mk = mk_opt.unwrap();
 
     require!(!mk.paused, MarketError::MarketPaused);
+    require!(args.amount >= mk.min_betting_price, MarketError::InvalidArgument);
 
-    let r_opt = mk.rounds.iter_mut().find(|r| r.round_index == mk.current_round);
-    require!(r_opt.is_some(), MarketError::InvalidArgument);
+    let round = &mut ctx.accounts.round;
 
-    let round = r_opt.unwrap();
+    let now = Clock::get()?.unix_timestamp as u32;
+    require!(now <= round.start_time + mk.betting_period as u32, MarketError::InvalidTime);
 
-    let now = Clock::get()?.unix_timestamp as u64;
-    require!(now <= round.end_time, MarketError::InvalidArgument);
 
-    let ix = system_instruction::transfer(user.key, escrow.key, amount);
     invoke_signed(
-        &ix,
+        &system_instruction::transfer(user.key, &state.escrow_pubkey, args.amount),
         &[
             user.to_account_info(),
             escrow.to_account_info(),
@@ -45,7 +49,7 @@ pub fn user_bet_impl(
         &[],
     )?;
 
-    let dir = match direction {
+    let dir = match args.direction {
         1 => Direction::Up,
         2 => Direction::Down,
         _ => return err!(MarketError::InvalidArgument),
@@ -53,25 +57,28 @@ pub fn user_bet_impl(
 
     round.bets.push(Bet {
         user: user.key(),
-        amount,
+        amount: args.amount,
+        result: 0,
         direction: dir,
+        refunded: false,
     });
     match dir {
-        Direction::Up => round.total_up = round.total_up.saturating_add(amount),
-        Direction::Down => round.total_down = round.total_down.saturating_add(amount),
+        Direction::Up => round.total_up = round.total_up.saturating_add(args.amount),
+        Direction::Down => round.total_down = round.total_down.saturating_add(args.amount),
     }
 
     msg!(
         "UserBet => market={}, user={}, amount={}, dir={:?}",
         mk.market_id,
         user.key(),
-        amount,
+        args.amount,
         dir
     );
     Ok(())
 }
 
 #[derive(Accounts)]
+#[instruction(args: UserBetArgs)]
 pub struct UserBet<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
@@ -83,119 +90,83 @@ pub struct UserBet<'info> {
     )]
     pub state: Account<'info, State>,
 
+    #[account(
+        mut, 
+        seeds = [ROUND_SEED, args.round_index.to_le_bytes().as_ref()],
+        bump
+    )]
+    pub round: Account<'info, Round>,
+
     /// CHECK: escrow_vault
-    #[account(mut)]
+    #[account(
+        mut, 
+        seeds = [ESCROW_SEED],
+        bump
+    )]
     pub escrow: AccountInfo<'info>,
 
     pub system_program: Program<'info, System>,
 }
 
+
 // --------------------------
 //    4.8 AutoSettleAll
 // --------------------------
-pub fn auto_settle_all_impl(
-    ctx: Context<AutoSettleAll>,
-    max_confidence: u64,
-) -> Result<()> {
-    let state = &mut ctx.accounts.state;
-    let signer = &ctx.accounts.signer;
-    let escrow = &ctx.accounts.escrow;
-    let system_program = &ctx.accounts.system_program;
 
-    require_keys_eq!(escrow.key(), state.escrow_vault);
-
-    let clock = Clock::get()?;
-    let now = clock.unix_timestamp as u64;
-
-    // Pyth test first
-    let pyth_pid = Pubkey::new_unique();
-
-    let seeds: &[&[u8]] = &[ESCROW_SEED];
-    let (_pda, bump) = Pubkey::find_program_address(seeds, ctx.program_id);
-
-
-    for mk in state.markets.iter_mut() {
-        //todo: read from PDA
-        let (roundAccount, bump) = Pubkey::find_program_address(
-            &[b"round", mk.current_round.as_ref()],
-            ctx.program_id,
-        );
-        let mut data_slice: &[u8] = &roundAccount.data.borrow();
-
-        let round: Round = 
-            Round::try_deserialize(
-                &mut data_slice,
-            )?;
-
-        if !round.start_price_set && now >= round.start_time {
-            let pyth_acc_opt = ctx.remaining_accounts.iter().find(|acc| acc.key() == mk.pyth_price_account);
-            if let Some(oracle_acc) = pyth_acc_opt {
-                let p_res = get_pyth_price(oracle_acc, &pyth_pid, max_confidence);
-                if p_res.is_ok() {
-                    let price = p_res.unwrap().price;
-                    round.start_price = Some(price);
-                    round.start_price_set = true;
-
-                    let total_pool = (round.total_up as u128).saturating_add(round.total_down as u128);
-                    let incentive_a = total_pool
-                        .saturating_mul(state.start_incentive_percent as u128)
-                        / 100;
-                    if incentive_a > 0 {
-                        let inc_amount = incentive_a as u64;
-                        transfer_from_escrow(
-                            &escrow.to_account_info(),
-                            &signer.key(),
-                            inc_amount,
-                            system_program,
-                            ctx.program_id,
-                            bump,
-                        )?;
-                        msg!("Incentive => lock startPrice: {} lamports to {}", inc_amount, signer.key());
-                    }
-                }
-            }
-        }
-
-        if !round.end_price_set && now >= round.end_time {
-            let pyth_acc_opt = ctx.remaining_accounts.iter().find(|acc| acc.key() == mk.pyth_price_account);
-            if let Some(oracle_acc) = pyth_acc_opt {
-                let p_res = get_pyth_price(oracle_acc, &pyth_pid, max_confidence);
-                if p_res.is_ok() {
-                    let price = p_res.unwrap().price;
-                    round.end_price = Some(price);
-                    round.end_price_set = true;
-
-                    let total_pool = (round.total_up as u128).saturating_add(round.total_down as u128);
-                    state.end_incentive_percent = 1;
-                    let incentive_b = total_pool
-                        .saturating_mul(state.end_incentive_percent as u128)
-                        / 100;
-                    if incentive_b > 0 {
-                        let inc_amount = incentive_b as u64;
-                        transfer_from_escrow(
-                            &escrow.to_account_info(),
-                            &signer.key(),
-                            inc_amount,
-                            system_program,
-                            ctx.program_id,
-                            bump,
-                        )?;
-                        msg!("Incentive => lock endPrice: {} lamports to {}", inc_amount, signer.key());
-                    }
-                }
-            }
-        }
-
-        round_settle(&ctx, state, escrow, system_program, bump, mk, round)?;
-    }
-
-    Ok(())
+#[derive(AnchorDeserialize, AnchorSerialize)]
+pub struct ProcessRoundArgs {
+    market_id: String,
+    round_index: u32,
+    maximum_age: u32,
+    feed_id: String,
+    // time: u32,
+    // price: u64,
 }
 
-fn round_settle(ctx: &Context<'_, '_, '_, '_, AutoSettleAll<'_>>, state: &mut Account<'_, State>, escrow: &AccountInfo<'_>, system_program: &Program<'_, System>, bump: u8, mk: &mut super::Market, mut round: Pubkey) -> Result<(), Error> {
-    Ok(if round.end_price_set && !round.settled {
-        let sp = round.start_price.unwrap_or(0);
-        let ep = round.end_price.unwrap_or(0);
+pub fn process_round_impl(ctx: Context<ProcessRound>, args: ProcessRoundArgs) -> Result<()> {
+    let system_program = &ctx.accounts.system_program;
+    let creater = &ctx.accounts.creater;
+    let admin = &ctx.accounts.admin;
+    let escrow = &ctx.accounts.escrow;
+
+    require!(*admin.key == ctx.accounts.state.admin_pubkey, MarketError::InvalidArgument);
+
+    let clock = Clock::get()?;
+    let now = clock.unix_timestamp as u32;
+    // let now = args.time;
+
+    let state = &mut ctx.accounts.state;
+    let escrow_bump = state.escrow_bump;
+    let c_percent = state.creator_fee_percent;
+
+    let mk_opt = state.markets.iter_mut().find(|m| m.market_id == args.market_id);
+    require!(mk_opt.is_some(), MarketError::InvalidMarket);
+    let mk = mk_opt.unwrap();
+
+    require!(*creater.key == mk.creator_pubkey, MarketError::InvalidArgument);
+
+    let round = &mut ctx.accounts.round;
+    let price_update = &ctx.accounts.price_update;
+    let pyth_price = price_update.get_price_no_older_than(
+        &clock, args.maximum_age as u64, &get_feed_id_from_hex(&args.feed_id)?,
+    )?;
+    require!(pyth_price.price > 0, MarketError::InvalidPythPrice);
+    let price = pyth_price.price as u64;
+    // let price = args.price;
+
+    if round.start_price == 0 && round.start_time == 0 {
+        round.start_price = price;
+        round.start_time = now;
+        round.end_time = now + (mk.betting_period + mk.settling_period) as u32;
+    }
+
+    if round.end_price == 0 && now >= round.end_time {
+        round.end_price = price;
+    }
+
+    if round.end_price > 0 && !round.settled {
+        let sp = round.start_price;
+        let ep = round.end_price;
         let total_up = round.total_up;
         let total_down = round.total_down;
 
@@ -216,37 +187,22 @@ fn round_settle(ctx: &Context<'_, '_, '_, '_, AutoSettleAll<'_>>, state: &mut Ac
                 total_up
             };
             if loser_pool == 0 {
-                for bet in &round.bets {
-                    refund_bet(bet, &escrow.to_account_info(), system_program, ctx.program_id, bump)?;
+                for bet in round.bets.iter_mut() {
+                    bet.result = bet.amount;
                 }
             } else {
-                let total_fee = loser_pool.saturating_mul(fee_rate) / 10000;
+                let total_fee = loser_pool.saturating_mul(fee_rate as u64) / 100;
                 let distributable = loser_pool.saturating_sub(total_fee);
 
                 // creator_fee_percent
-                let c_percent = state.creator_fee_percent.min(100);
-                let fee_creator = total_fee.saturating_mul(c_percent) / 100;
+                let fee_creator = total_fee.saturating_mul(c_percent as u64) / 100;
                 let fee_admin = total_fee.saturating_sub(fee_creator);
 
                 if fee_creator > 0 {
-                    transfer_from_escrow(
-                        &escrow.to_account_info(),
-                        &mk.creator_pubkey,
-                        fee_creator,
-                        system_program,
-                        ctx.program_id,
-                        bump,
-                    )?;
+                    transfer_sol(&escrow, &creater, fee_creator, system_program, escrow_bump)?;
                 }
                 if fee_admin > 0 {
-                    transfer_from_escrow(
-                        &escrow.to_account_info(),
-                        &state.admin_pubkey,
-                        fee_admin,
-                        system_program,
-                        ctx.program_id,
-                        bump,
-                    )?;
+                    transfer_sol(&escrow, &admin, fee_admin, system_program, escrow_bump)?;
                 }
 
                 let winner_pool = if wdir == Direction::Up {
@@ -257,66 +213,32 @@ fn round_settle(ctx: &Context<'_, '_, '_, '_, AutoSettleAll<'_>>, state: &mut Ac
                 if winner_pool == 0 {
                     msg!("No winners => leftover remains in vault");
                 } else {
-                    for bet in &round.bets {
+                    for bet in round.bets.iter_mut() {
                         if bet.direction == wdir {
-                            let ratio = (bet.amount as u128)
-                                .saturating_mul(1_000_000_000u128)
-                                / (winner_pool as u128);
-                            let share = distributable as u128
-                                * ratio
-                                / 1_000_000_000u128;
-                            let share_u64 = share as u64;
-                            let total_payout = bet.amount.saturating_add(share_u64);
-
-                            if total_payout > 0 {
-                                transfer_from_escrow(
-                                    &escrow.to_account_info(),
-                                    &bet.user,
-                                    total_payout,
-                                    system_program,
-                                    ctx.program_id,
-                                    bump,
-                                )?;
-                            }
+                            let ratio = bet.amount.saturating_mul(1000u64) / winner_pool;
+                            let share = distributable * ratio / 1000u64;
+                            bet.result = bet.amount.saturating_add(share);
                         }
                     }
                 }
             }
         } else {
-            for bet in &round.bets {
-                refund_bet(bet, &escrow.to_account_info(), system_program, ctx.program_id, bump)?;
+            for bet in round.bets.iter_mut() {
+                bet.result = bet.amount;
             }
         }
 
+        mk.round_index = mk.round_index + 1;
         round.settled = true;
+    }
 
-        let nxt_idx = mk.current_round + 1;
-        let (ns, ne) = compute_round_time(
-            mk.creation_time,
-            mk.betting_period,
-            mk.settling_period,
-            nxt_idx,
-        );
-        let nr = Round {
-            round_index: nxt_idx,
-            start_time: ns,
-            end_time: ne,
-            start_price: None,
-            end_price: None,
-            start_price_set: false,
-            end_price_set: false,
-            total_up: 0,
-            total_down: 0,
-            bets: vec![],
-            settled: false,
-        };
-        mk.rounds.push(nr);
-        mk.current_round = nxt_idx;
-    })
+    Ok(())
 }
 
+
 #[derive(Accounts)]
-pub struct AutoSettleAll<'info> {
+#[instruction(args: ProcessRoundArgs)]
+pub struct ProcessRound<'info> {
     #[account(mut)]
     pub signer: Signer<'info>,
 
@@ -327,146 +249,146 @@ pub struct AutoSettleAll<'info> {
     )]
     pub state: Account<'info, State>,
 
-    /// CHECK: escrow_vault
+    pub price_update: Account<'info, PriceUpdateV2>,
+
+    #[account(
+        init_if_needed, 
+        payer = signer,
+        space = ANCHOR_DISCRIMINATOR + Round::INIT_SPACE, 
+        seeds = [ROUND_SEED, args.round_index.to_le_bytes().as_ref()],
+        bump
+    )]
+    pub round: Account<'info, Round>,
+
+    /// CHECK: market creater
     #[account(mut)]
+    pub creater: AccountInfo<'info>,
+
+    /// CHECK: market administrator
+    #[account(mut)]
+    pub admin: AccountInfo<'info>,
+
+    /// CHECK: escrow_vault
+    #[account(
+        mut, 
+        seeds = [ESCROW_SEED],
+        bump
+    )]
     pub escrow: AccountInfo<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+// --------------------------
+//    refund round
+// --------------------------
+pub fn refund_round_impl<'info>(
+    ctx: Context<'_, '_, '_, 'info, RefundRound<'info>>,
+    _market_id: String,
+    _round_index: u32,
+) -> Result<()> {
+    let state = &ctx.accounts.state;
+    let round = &mut ctx.accounts.round;
+
+    let mut pubkey_ai_map = BTreeMap::new();
+    for ai in ctx.remaining_accounts.iter() {
+        pubkey_ai_map.insert(ai.key, ai.to_account_info());
+    }
+
+    for bet in round.bets.iter_mut() {
+        if let Some(ai) = pubkey_ai_map.get(&bet.user) {
+            if !bet.refunded && bet.result > 0 {
+                transfer_sol(&ctx.accounts.escrow, &ai, bet.result, &ctx.accounts.system_program, state.escrow_bump)?;
+                bet.refunded = true;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Accounts)]
+#[instruction(market_id: String, round_index: u32)]
+pub struct RefundRound<'info> {
+    #[account(mut)]
+    pub signer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [STATE_SEED],
+        bump
+    )]
+    pub state: Account<'info, State>,
+
+    #[account(
+        mut, 
+        seeds = [ROUND_SEED, round_index.to_le_bytes().as_ref()],
+        bump
+    )]
+    pub round: Account<'info, Round>,
+
+    /// CHECK: escrow_vault
+    #[account(
+        mut, 
+        seeds = [ESCROW_SEED],
+        bump
+    )]
+    pub escrow: AccountInfo<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+// --------------------------
+//    close round
+// --------------------------
+pub fn close_round_impl(
+    _ctx: Context<CloseRound>,
+) -> Result<()> {
+    Ok(())
+}
+
+
+#[derive(Accounts)]
+#[instruction(round_index: u32)]
+pub struct CloseRound<'info> {
+    #[account(mut)]
+    pub signer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [STATE_SEED],
+        bump
+    )]
+    pub state: Account<'info, State>,
+
+    #[account(
+        mut, 
+        seeds = [ROUND_SEED, round_index.to_le_bytes().as_ref()],
+        close = signer,
+        bump
+    )]
+    pub round: Account<'info, Round>,
 
     pub system_program: Program<'info, System>,
 
 }
 
-// --------------------------
-//    4.9 UpdateSettleIncentive
-// --------------------------
-pub fn update_settle_incentive_impl(
-    ctx: Context<UpdateSettleIncentive>,
-    new_start_incentive_percent: u64,
-    new_end_incentive_percent: u64,
-) -> Result<()> {
-    let state = &mut ctx.accounts.state;
-    require!(new_start_incentive_percent <= 100, MarketError::InvalidArgument);
-    require!(new_end_incentive_percent <= 100, MarketError::InvalidArgument);
-
-    state.start_incentive_percent = new_start_incentive_percent;
-    state.end_incentive_percent = new_end_incentive_percent;
-
-    msg!(
-        "UpdateSettleIncentive => start={}, end={}",
-        new_start_incentive_percent,
-        new_end_incentive_percent
-    );
-    Ok(())
-}
-
-#[derive(Accounts)]
-pub struct UpdateSettleIncentive<'info> {
-    #[account(mut)]
-    pub admin: Signer<'info>,
-
-    #[account(
-        mut,
-        seeds = [STATE_SEED],
-        bump,
-        constraint = state.admin_pubkey == admin.key() @ MarketError::IllegalOwner
-    )]
-    pub state: Account<'info, State>,
-}
-
-pub fn compute_round_time(
-    creation_time: u64,
-    betting_period: u64,
-    settling_period: u64,
-    i: u64,
-) -> (u64, u64) {
-    let start = creation_time + betting_period + (i - 1) * (betting_period + settling_period);
-    let end = start + settling_period;
-    (start, end)
-}
-
-fn transfer_from_escrow<'info>(
-    escrow_info: &AccountInfo<'info>,
-    to: &Pubkey,
+fn transfer_sol<'info>(
+    escrow: &AccountInfo<'info>,
+    to: &AccountInfo<'info>,
     amount: u64,
     system_program: &Program<'info, System>,
-    program_id: &Pubkey,
     bump: u8,
 ) -> Result<()> {
-    if amount == 0 {
-        return Ok(());
-    }
-    let seeds = &[b"escrow_vault".as_ref(), &[bump]];
-    let ix = system_instruction::transfer(escrow_info.key, to, amount);
+    let seeds = &[ESCROW_SEED.as_ref(), &[bump]];
+    let ix = system_instruction::transfer(&escrow.key, &to.key, amount);
     invoke_signed(
         &ix,
         &[
-            escrow_info.clone(),
-            system_program.to_account_info().clone(),
+            escrow.to_account_info(),
+            to.to_account_info(),
+            system_program.to_account_info(),
         ],
         &[seeds],
     )?;
     Ok(())
-}
-
-fn refund_bet<'info>(
-    bet: &Bet,
-    escrow_info: &AccountInfo<'info>,
-    system_program: &Program<'info, System>,
-    program_id: &Pubkey,
-    bump: u8,
-) -> Result<()> {
-    if bet.amount == 0 {
-        return Ok(());
-    }
-    let seeds = &[b"escrow_vault".as_ref(), &[bump]];
-    let ix = system_instruction::transfer(escrow_info.key, &bet.user, bet.amount);
-    invoke_signed(
-        &ix,
-        &[
-            escrow_info.clone(),
-            system_program.to_account_info().clone(),
-        ],
-        &[seeds],
-    )?;
-    Ok(())
-}
-
-#[derive(Debug)]
-pub struct PythPriceResult {
-    pub price: i64,
-    pub exponent: i32,
-    pub confidence: u64,
-    pub status: PriceStatus,
-    pub valid_slot: u64,
-}
-
-fn get_pyth_price(
-    oracle_account: &AccountInfo,
-    pyth_pid: &Pubkey,
-    max_conf: u64,
-) -> Result<PythPriceResult> {
-    require_keys_eq!(*oracle_account.owner, *pyth_pid, MarketError::IllegalOwner);
-
-    const STALENESS_THRESHOLD: u64 = 60;
-
-    let clock = Clock::get()?;
-    let price_feed: PriceFeed = SolanaPriceAccount::account_info_to_feed(oracle_account)
-        .map_err(|_| error!(MarketError::InvalidAccountData))?;
-
-    let current_price: Price = price_feed
-        .get_price_no_older_than(clock.unix_timestamp, STALENESS_THRESHOLD)
-        .ok_or_else(|| error!(MarketError::PriceStale))?;
-
-    let raw_price = current_price.price;
-    let expo = current_price.expo;
-    let conf = current_price.conf;
-
-    require!(conf <= max_conf, MarketError::ConfidenceTooHigh);
-
-    Ok(PythPriceResult {
-        price: raw_price,
-        exponent: expo,
-        confidence: conf,
-        status: PriceStatus::Trading,
-        valid_slot: 0,
-    })
 }

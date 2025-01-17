@@ -20,21 +20,23 @@ pub enum MarketError {
     #[msg("InvalidArgument")]
     InvalidArgument,
     
+    #[msg("InvalidTime")]
+    InvalidTime,
+    
+    #[msg("InvalidMarket")]
+    InvalidMarket,
+    
+    #[msg("InvalidPriceFeed")]
+    InvalidPriceFeed,
+    
     #[msg("MarketPaused")]
     MarketPaused,
 
-    #[msg("InvalidPythMagic")]
-    InvalidPythMagic,
-    #[msg("InvalidPythVersion")]
-    InvalidPythVersion,
-    #[msg("InvalidPythPtype")]
-    InvalidPythPtype,
-    #[msg("PriceNotTrading")]
-    PriceNotTrading,
+    // Pyth相关
+    #[msg("InvalidPythPrice")]
+    InvalidPythPrice,
     #[msg("PriceStale")]
     PriceStale,
     #[msg("ConfidenceTooHigh")]
     ConfidenceTooHigh,
-    #[msg("Overflow")]
-    Overflow,
 }

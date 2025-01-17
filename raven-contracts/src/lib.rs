@@ -2,17 +2,22 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::sysvar::Sysvar as SolanaSysvar;
 
 pub mod error;
+pub mod state;
+pub mod constants;
 pub mod instructions;
 
-use instructions::init_state::*;
-use instructions::price_feed::*;
-use instructions::market::*;
-use instructions::bet::*;
+pub use crate::constants::*;
+pub use crate::state::*;
 
-declare_id!("Cph9VnsRozrHidnJykp1eT1ZAQZbZ3zKvsJxj89zjttu");
+pub use instructions::init_state::*;
+pub use instructions::price_feed::*;
+pub use instructions::market::*;
+pub use instructions::bet::*;
+
+declare_id!("21fdwXkLrfsh1H8tto8fYKmJ3sfJP9W258YTb7J9wbFT");
 
 #[program]
-pub mod anchor_prediction_market {
+pub mod raven_market {
     use instructions::market::{create_market_impl, pause_market_impl, resume_market_impl};
 
     use super::*;
@@ -20,8 +25,8 @@ pub mod anchor_prediction_market {
     // --------------------------
     //    4.1 InitState
     // --------------------------
-    pub fn init_state(ctx: Context<InitState>, args: InitStateArgs) -> Result<()> {
-        init_state_impl(ctx, args)
+    pub fn init_state(ctx: Context<InitState>, admin_pubkey: Pubkey, creator_fee_percent: u8) -> Result<()> {
+        init_state_impl(ctx, admin_pubkey, creator_fee_percent)
     }
 
     // --------------------------
@@ -62,90 +67,34 @@ pub mod anchor_prediction_market {
     // --------------------------
     //    4.7 UserBet
     // --------------------------
-    pub fn user_bet(
-        ctx: Context<UserBet>,
-        direction: u8,
-        amount: u64,
-        market_id: String,
-    ) -> Result<()> {
-        user_bet_impl(ctx, direction, amount, market_id)
+    pub fn user_bet(ctx: Context<UserBet>, args: UserBetArgs) -> Result<()> {
+        user_bet_impl(ctx, args)
     }
 
     // --------------------------
     //    4.8 AutoSettleAll
     // --------------------------
-    pub fn auto_settle_all(
-        ctx: Context<AutoSettleAll>,
-        max_confidence: u64,
-    ) -> Result<()> {
-        auto_settle_all_impl(ctx, max_confidence)
+    pub fn process_round(ctx: Context<ProcessRound>, args: ProcessRoundArgs) -> Result<()> {
+        process_round_impl(ctx, args)
     }
 
     // --------------------------
-    //    4.9 UpdateSettleIncentive
+    //    4.9 AutoSettleAll
     // --------------------------
-    pub fn update_settle_incentive(
-        ctx: Context<UpdateSettleIncentive>,
-        new_start_incentive_percent: u64,
-        new_end_incentive_percent: u64,
+    pub fn refund_round<'info>(
+        ctx: Context<'_, '_, '_, 'info, RefundRound<'info>>,
+        market_id: String,
+        round_index: u32,
     ) -> Result<()> {
-        update_settle_incentive_impl(ctx, new_start_incentive_percent, new_end_incentive_percent)
+        refund_round_impl(ctx, market_id, round_index)
     }
 
-
-    pub fn query_all_markets(_ctx: Context<QueryAllMarkets>) -> Result<()> {
-        msg!("QueryAllMarkets => simply read state.markets on client side");
-        Ok(())
+    // --------------------------
+    //    4.9 close_round
+    // --------------------------
+    pub fn close_round(
+        ctx: Context<CloseRound>,
+    ) -> Result<()> {
+        close_round_impl(ctx)
     }
-
-    pub fn query_market_by_id(_ctx: Context<QueryMarketById>, market_id: String) -> Result<()> {
-        msg!("QueryMarketById => market_id={}, read from state in client", market_id);
-        Ok(())
-    }
-
-    pub fn query_all_pricefeeds(_ctx: Context<QueryAllPriceFeeds>) -> Result<()> {
-        msg!("QueryAllPriceFeeds => read from state.allowed_pricefeeds in client");
-        Ok(())
-    }
-
-    pub fn query_settle_incentive(_ctx: Context<QuerySettleIncentive>) -> Result<()> {
-        msg!("QuerySettleIncentive => read from state in client");
-        Ok(())
-    }
-}
-
-#[derive(Accounts)]
-pub struct QueryAllMarkets<'info> {
-    #[account(
-        seeds = [STATE_SEED],
-        bump
-    )]
-    pub state: Account<'info, State>,
-}
-
-#[derive(Accounts)]
-pub struct QueryMarketById<'info> {
-    #[account(
-        seeds = [STATE_SEED],
-        bump
-    )]
-    pub state: Account<'info, State>,
-}
-
-#[derive(Accounts)]
-pub struct QueryAllPriceFeeds<'info> {
-    #[account(
-        seeds = [STATE_SEED],
-        bump
-    )]
-    pub state: Account<'info, State>,
-}
-
-#[derive(Accounts)]
-pub struct QuerySettleIncentive<'info> {
-    #[account(
-        seeds = [STATE_SEED],
-        bump
-    )]
-    pub state: Account<'info, State>,
 }

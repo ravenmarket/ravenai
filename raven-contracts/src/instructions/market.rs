@@ -1,28 +1,29 @@
-use anchor_lang::{prelude::*, solana_program::{program::invoke_signed, system_instruction}};
+use anchor_lang::{prelude::*, solana_program::system_instruction};
 
-use crate::{error::MarketError, Market, Round};
-
-use super::{State, STATE_SEED};
-
-use crate::instructions::bet::*;
+use crate::error::MarketError;
+use crate::constants::*;
+use crate::state::*;
 
 #[derive(AnchorDeserialize, AnchorSerialize)]
 pub struct CreateMarketArgs {
-    fee_rate: u64,
-    betting_period: u64,
-    settling_period: u64,
+    fee_rate: u8,
+    betting_period: u16,
+    settling_period: u16,
     market_id: String,
+    symbol: String,
 }
 
 pub fn create_market_impl(ctx: Context<CreateMarket>, args: CreateMarketArgs) -> Result<()> {
+    require!(args.fee_rate <= 100, MarketError::InvalidArgument);
+
     let state = &mut ctx.accounts.state;
     let creator = &ctx.accounts.creator;
 
-    let pf_opt = state
-        .allowed_pricefeeds
-        .iter()
-        .find(|pf| pf.symbol == args.market_id);
-    require!(pf_opt.is_some(), MarketError::InvalidArgument);
+    require!(args.fee_rate <= 100, MarketError::InvalidArgument);
+
+    let pf_opt = state.allowed_pricefeeds.iter()
+        .find(|pf| pf.symbol == args.symbol);
+    require!(pf_opt.is_some(), MarketError::InvalidPriceFeed);
     let pf = pf_opt.unwrap();
 
     require!(
@@ -32,25 +33,23 @@ pub fn create_market_impl(ctx: Context<CreateMarket>, args: CreateMarketArgs) ->
             && (args.settling_period <= pf.max_settling_period),
         MarketError::InvalidArgument
     );
+    require!(*ctx.accounts.admin.key == state.admin_pubkey, MarketError::InvalidArgument);
 
-    if state.market_creation_fee_lamports > 0 {
+    if pf.create_market_lamports > 0 {
         let ix = system_instruction::transfer(
             creator.key,
-            ctx.accounts.admin_info.key,
-            state.market_creation_fee_lamports,
+            ctx.accounts.admin.key,
+            pf.create_market_lamports,
         );
-        invoke_signed(
+        anchor_lang::solana_program::program::invoke_signed(
             &ix,
             &[
                 creator.to_account_info(),
-                ctx.accounts.admin_info.clone(),
-                ctx.accounts.system_program.to_account_info(),
-            ],
-            &[],
+                ctx.accounts.admin.clone(),
+                // ctx.accounts.system_program.to_account_info(),
+            ], &[]
         )?;
     }
-
-    require!(args.fee_rate <= 10000, MarketError::InvalidArgument);
 
     for m in &state.markets {
         if m.market_id == args.market_id {
@@ -58,31 +57,19 @@ pub fn create_market_impl(ctx: Context<CreateMarket>, args: CreateMarketArgs) ->
         }
     }
 
-    let now = Clock::get()?.unix_timestamp as u64;
-    let mut new_mk = Market {
+    let now = Clock::get()?.unix_timestamp as u32;
+    let new_mk = Market {
         market_id: args.market_id.clone(),
+        pyth_feed_id: pf.pyth_feed_id.clone(),
         creation_time: now,
         paused: false,
-        fee_rate: args.fee_rate.clone(),
+        fee_rate: args.fee_rate,
+        min_betting_price: pf.min_betting_lamports,
         betting_period: args.betting_period,
         settling_period: args.settling_period,
         creator_pubkey: creator.key(),
-        pyth_price_account: pf.pyth_account,
+        round_index: 0,
         // current_round: null_mut(),
-    };
-    let (s, e) = compute_round_time(now, args.betting_period, args.settling_period, 1);
-    let r1 = Round {
-        round_index: 1,
-        start_time: s,
-        end_time: e,
-        start_price: None,
-        end_price: None,
-        start_price_set: false,
-        end_price_set: false,
-        total_up: 0,
-        total_down: 0,
-        bets: vec![],
-        settled: false,
     };
     state.markets.push(new_mk);
 
@@ -95,7 +82,9 @@ pub struct CreateMarket<'info> {
     #[account(mut)]
     pub creator: Signer<'info>,
 
-    pub admin_info: AccountInfo<'info>,
+    /// CHECK: 
+    #[account(mut)]
+    pub admin: AccountInfo<'info>,
 
     #[account(
         mut,
@@ -115,7 +104,7 @@ pub fn pause_market_impl(ctx: Context<PauseMarket>, market_id: String) -> Result
     let is_admin_user = signer.key() == ctx.accounts.state.admin_pubkey && signer.is_signer;
 
     let mk_opt = ctx.accounts.state.markets.iter_mut().find(|m| m.market_id == market_id);
-    require!(mk_opt.is_some(), MarketError::InvalidArgument);
+    require!(mk_opt.is_some(), MarketError::InvalidMarket);
     let mk = mk_opt.unwrap();
 
     let is_creator_user = signer.key() == mk.creator_pubkey && signer.is_signer;
@@ -129,7 +118,7 @@ pub fn pause_market_impl(ctx: Context<PauseMarket>, market_id: String) -> Result
 #[derive(Accounts)]
 pub struct PauseMarket<'info> {
     #[account(mut)]
-    pub signer: Signer<'info>,
+    pub signer: Signer<'info>, // 可能是 creator 或 admin
 
     #[account(
         mut,
@@ -149,7 +138,7 @@ pub fn resume_market_impl(ctx: Context<ResumeMarket>, market_id: String) -> Resu
     require!(admin.key() == state.admin_pubkey && admin.is_signer, MarketError::IllegalOwner);
 
     let mk_opt = state.markets.iter_mut().find(|m| m.market_id == market_id);
-    require!(mk_opt.is_some(), MarketError::InvalidArgument);
+    require!(mk_opt.is_some(), MarketError::InvalidMarket);
     mk_opt.unwrap().paused = false;
 
     msg!("ResumeMarket => {}", market_id);
