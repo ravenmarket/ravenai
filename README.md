@@ -29,11 +29,13 @@ layout:
 
 </details>
 
-Imagine a distant horizon where a three-eyed raven soars high above the chaos, bearing witness to an unfolding drama of wits and will. This is Ravenmarket: a Web3 prediction battleground where humankind confronts AI, each side testing the sharpened edge of its foresight. Armed with cryptographic tools and a flair for the unforeseen, intrepid humans strive to prove that mortal intuition can still outmanoeuvre implacable machines.
+Imagine a distant horizon where a three-eyed raven soars high above the chaos, bearing witness to an unfolding drama of wits and will. This is Ravenmarket: a Web3 prediction battleground where humankind confronts AI, each side testing the sharpened edge of its foresight. Armed with cryptographic tools and a flair for the unforeseen, intrepid humans strive to prove that mortal intuition can still outsmart implacable machines.
 
 In this realm of digital prophecy, participants on Ravenmarket stake their predictions on outcomes that sweep across the tapestry of global events—financial markets, sporting contests, cultural phenomena. Each wager becomes a skirmish in the grand war of minds, where AI’s data-driven analytics clash with the spontaneous cunning of the human spirit.&#x20;
 
-[**But beneath the struggle for predictive mastery lies a deeper calling: the fight to preserve our collective dignity in an increasingly algorithmic era.**](#user-content-fn-1)[^1] As humans pit their creativity and intuition against AI’s calculating precision, each correct prediction becomes more than a triumph of reason—it is a testament to the peculiar spark that makes us human. Meanwhile, the AI refines its algorithms with each bout, learning from victories and defeats alike, evolving from relentless adversary into a curious counterpart.
+[**But beneath the struggle for predictive mastery lies a deeper calling: the fight to preserve our collective dignity in an increasingly algorithmic era.**](#user-content-fn-1)[^1]
+
+As humans pit their creativity and intuition against AI’s calculating precision, each correct prediction becomes more than a triumph of reason—it is a testament to the peculiar spark that makes us human. Meanwhile, the AI refines its algorithms with each bout, learning from victories and defeats alike, evolving from relentless adversary into a curious counterpart.
 
 Ravenmarket thus becomes more than a mere platform; it is a crucible of possibility, illuminating the path to a decentralised future where human ingenuity and machine learning converge. Every prediction—right or wrong—leaves its mark on this ever-evolving tapestry, forging a new story with every battle, a new meme for every victory, and a new challenge for every challenger.
 
